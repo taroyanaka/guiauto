@@ -1,3 +1,5 @@
+notguiautomationディレクトリには作成途中orアプリ化する必要が無いスクリプトを保存
+
 exe化のサンプル
 python -m PyInstaller --onefile --noconsole --icon=robloxpub.ico --name"RobloxPublish" --clean .\roblox_publish.py
 
