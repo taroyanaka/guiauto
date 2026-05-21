@@ -14,8 +14,10 @@
 #      空白の場合は実行されません。
 #   4. 画像をドラッグ&ドロップします。複数ファイルをまとめて処理できます。
 #      ファイル未選択の場合は、このスクリプトと同じフォルダの input.png を処理します。
-#   5. 実行後、ページ下部でマスクあり/なしのプレビューを切り替えられます。
-#   6. 出力は notguiautomation\masked_outputs に保存されます。
+#   5. 赤文字などの色付き文字がOCRされにくい場合は、
+#      「色付き文字の検出強度」を弱/中/強から選んで実行します。
+#   6. 実行後、ページ下部でマスクあり/なしのプレビューを切り替えられます。
+#   7. 出力は notguiautomation\masked_outputs に保存されます。
 #      元画像: 元ファイル名-original[拡張子]
 #      透過マスク: 元ファイル名-mask.png
 #
@@ -36,6 +38,7 @@
 
 from __future__ import annotations
 
+import argparse
 import html
 import json
 import os
@@ -73,6 +76,23 @@ TARGET_WORDS_DEFAULT = [
     "ろ過",
     "融点",
     "沸点",
+    "蒸留",
+    "分留",
+    "昇華法",
+    "再結晶",
+    "抽出",
+    "クロマトグラフィー",
+    "元素",
+    "元素記号",
+    "単体",
+    "化合物",
+    "同素体",
+    "炎色反応",
+    "白色",
+    "青色",
+    "拡散",
+    "熱運動",
+    "状態の三態",
     "ふってん",
     "ゆうてん",
     "じゅんぶっしつ",
@@ -104,14 +124,137 @@ def safe_filename(name: str, fallback: str = "image") -> str:
     return f"{stem or fallback}{suffix}"
 
 
-def mask_specific_words(image: np.ndarray, target_list: list[str]) -> np.ndarray:
+def normalize_ocr_text(text: str) -> str:
+    return text.replace(" ", "").replace("　", "")
+
+
+def make_contrast_variant(image: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+
+
+def get_color_thresholds(color_ocr_strength: str) -> dict[str, int]:
+    thresholds = {
+        "weak": {"red_s": 45, "red_v": 35, "vivid_s": 85, "vivid_v": 45, "lab_a": 150},
+        "medium": {"red_s": 34, "red_v": 28, "vivid_s": 68, "vivid_v": 36, "lab_a": 142},
+        "strong": {"red_s": 18, "red_v": 18, "vivid_s": 44, "vivid_v": 26, "lab_a": 134},
+    }
+    return thresholds.get(color_ocr_strength, thresholds["strong"])
+
+
+def make_color_pixel_mask(image: np.ndarray, color_ocr_strength: str) -> np.ndarray:
+    threshold = get_color_thresholds(color_ocr_strength)
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    hue = hsv[:, :, 0]
+    saturation = hsv[:, :, 1]
+    value = hsv[:, :, 2]
+
+    red_pixels = (
+        ((hue <= 20) | (hue >= 160))
+        & (saturation >= threshold["red_s"])
+        & (value >= threshold["red_v"])
+    )
+    vivid_pixels = (saturation >= threshold["vivid_s"]) & (value >= threshold["vivid_v"])
+
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    a_channel = lab[:, :, 1]
+    red_lab_pixels = (a_channel >= threshold["lab_a"]) & (value >= threshold["red_v"])
+
+    color_pixels = (red_pixels | vivid_pixels | red_lab_pixels).astype(np.uint8) * 255
+    close_kernel = np.ones((2, 2), np.uint8)
+    color_pixels = cv2.morphologyEx(color_pixels, cv2.MORPH_CLOSE, close_kernel)
+
+    if color_ocr_strength == "strong":
+        color_pixels = cv2.dilate(color_pixels, np.ones((2, 2), np.uint8), iterations=1)
+
+    return color_pixels
+
+
+def make_colored_text_variant(image: np.ndarray, color_ocr_strength: str) -> np.ndarray:
+    color_pixels = make_color_pixel_mask(image, color_ocr_strength)
+    text_like = np.full(image.shape[:2], 255, dtype=np.uint8)
+    text_like[color_pixels > 0] = 0
+    return cv2.cvtColor(text_like, cv2.COLOR_GRAY2BGR)
+
+
+def make_red_ink_context_variant(image: np.ndarray, color_ocr_strength: str) -> np.ndarray:
+    color_pixels = make_color_pixel_mask(image, color_ocr_strength)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    light_gray = cv2.addWeighted(gray, 0.35, np.full_like(gray, 255), 0.65, 0)
+    light_gray[color_pixels > 0] = 0
+    return cv2.cvtColor(light_gray, cv2.COLOR_GRAY2BGR)
+
+
+def upscale_variant(image: np.ndarray, scale: float) -> np.ndarray:
+    return cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+
+def make_ocr_variants(image: np.ndarray, color_ocr_strength: str) -> list[tuple[np.ndarray, float]]:
+    variants: list[tuple[np.ndarray, float]] = [
+        (image, 1.0),
+        (make_contrast_variant(image), 1.0),
+    ]
+    if color_ocr_strength != "off":
+        colored_text = make_colored_text_variant(image, color_ocr_strength)
+        red_context = make_red_ink_context_variant(image, color_ocr_strength)
+        variants.append((colored_text, 1.0))
+        variants.append((red_context, 1.0))
+
+        if color_ocr_strength in {"medium", "strong"}:
+            scale = 1.5 if color_ocr_strength == "medium" else 2.0
+            variants.append((upscale_variant(colored_text, scale), scale))
+            variants.append((upscale_variant(red_context, scale), scale))
+    return variants
+
+
+def scale_bbox_to_original(bbox: Any, scale: float) -> list[list[float]]:
+    if scale == 1.0:
+        return bbox
+    return [[point[0] / scale, point[1] / scale] for point in bbox]
+
+
+def bbox_key(bbox: list[list[float]], text: str) -> tuple[str, int, int, int, int]:
+    xs = [point[0] for point in bbox]
+    ys = [point[1] for point in bbox]
+    return (
+        normalize_ocr_text(text),
+        round(min(xs) / 8),
+        round(min(ys) / 8),
+        round(max(xs) / 8),
+        round(max(ys) / 8),
+    )
+
+
+def read_text_variants(image: np.ndarray, color_ocr_strength: str) -> list[tuple[Any, str, float]]:
     reader = get_reader()
+    results: list[tuple[Any, str, float]] = []
+    seen: set[tuple[str, int, int, int, int]] = set()
+
+    for variant, scale in make_ocr_variants(image, color_ocr_strength):
+        for bbox, text, prob in reader.readtext(variant):
+            original_bbox = scale_bbox_to_original(bbox, scale)
+            key = bbox_key(original_bbox, text)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append((original_bbox, text, prob))
+
+    return results
+
+
+def mask_specific_words(
+    image: np.ndarray,
+    target_list: list[str],
+    color_ocr_strength: str = "strong",
+) -> np.ndarray:
     height, width = image.shape[:2]
     mask = np.zeros((height, width, 4), dtype=np.uint8)
-    results = reader.readtext(image)
+    results = read_text_variants(image, color_ocr_strength)
 
     for bbox, text, _prob in results:
-        cleaned_text = text.replace(" ", "").replace("　", "")
+        cleaned_text = normalize_ocr_text(text)
         if not cleaned_text or not text:
             continue
 
@@ -146,13 +289,18 @@ def build_output_names(original_name: str) -> tuple[str, str]:
     return f"{path.stem}-original{path.suffix}", f"{path.stem}-mask.png"
 
 
-def process_image_bytes(data: bytes, original_name: str, target_list: list[str]) -> dict[str, str]:
+def process_image_bytes(
+    data: bytes,
+    original_name: str,
+    target_list: list[str],
+    color_ocr_strength: str = "strong",
+) -> dict[str, str]:
     image_array = np.frombuffer(data, dtype=np.uint8)
     image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError(f"{original_name} を画像として読み込めませんでした。")
 
-    mask = mask_specific_words(image, target_list)
+    mask = mask_specific_words(image, target_list, color_ocr_strength)
     original_output_name, mask_output_name = build_output_names(original_name)
     original_output_path = OUTPUT_DIR / original_output_name
     mask_output_path = OUTPUT_DIR / mask_output_name
@@ -170,10 +318,13 @@ def process_image_bytes(data: bytes, original_name: str, target_list: list[str])
     }
 
 
-def process_default_input(target_list: list[str]) -> dict[str, str]:
+def process_default_input(
+    target_list: list[str],
+    color_ocr_strength: str = "strong",
+) -> dict[str, str]:
     if not DEFAULT_INPUT.exists():
         raise FileNotFoundError(f"デフォルト画像が見つかりません: {DEFAULT_INPUT}")
-    return process_image_bytes(DEFAULT_INPUT.read_bytes(), DEFAULT_INPUT.name, target_list)
+    return process_image_bytes(DEFAULT_INPUT.read_bytes(), DEFAULT_INPUT.name, target_list, color_ocr_strength)
 
 
 def make_zip(results: list[dict[str, str]]) -> str | None:
@@ -190,7 +341,7 @@ def make_zip(results: list[dict[str, str]]) -> str | None:
     return f"/outputs/{quote(zip_name)}"
 
 
-def parse_multipart_form(headers: Any, body: bytes) -> tuple[str, list[tuple[bytes, str]]]:
+def parse_multipart_form(headers: Any, body: bytes) -> tuple[str, str, list[tuple[bytes, str]]]:
     content_type = headers.get("Content-Type", "")
     if not content_type.startswith("multipart/form-data"):
         raise ValueError("multipart/form-data 形式で送信してください。")
@@ -202,6 +353,7 @@ def parse_multipart_form(headers: Any, body: bytes) -> tuple[str, list[tuple[byt
     ).encode("utf-8") + body
     message = BytesParser(policy=email_policy).parsebytes(raw_message)
     target_text = ""
+    color_ocr_strength = "strong"
     uploads: list[tuple[bytes, str]] = []
 
     for part in message.iter_parts():
@@ -215,12 +367,17 @@ def parse_multipart_form(headers: Any, body: bytes) -> tuple[str, list[tuple[byt
             target_text = payload.decode(charset, errors="replace")
             continue
 
+        if name == "color_ocr_strength":
+            value = payload.decode("utf-8", errors="replace")
+            color_ocr_strength = value if value in {"weak", "medium", "strong"} else "strong"
+            continue
+
         if name == "images":
             filename = part.get_filename()
             if filename and payload:
                 uploads.append((payload, filename))
 
-    return target_text, uploads
+    return target_text, color_ocr_strength, uploads
 
 
 def build_index_html() -> str:
@@ -331,6 +488,24 @@ def build_index_html() -> str:
       gap: 10px;
       align-items: center;
       margin-top: 14px;
+    }}
+    .option-line {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      color: #374151;
+      font-size: 14px;
+      line-height: 1.4;
+    }}
+    .option-line select {{
+      min-width: 80px;
+      border: 1px solid #b9afa0;
+      border-radius: 6px;
+      background: #fffdf8;
+      color: #1e2528;
+      padding: 7px 9px;
+      font: inherit;
     }}
     button {{
       appearance: none;
@@ -496,6 +671,14 @@ def build_index_html() -> str:
           </div>
         </div>
         <input id="fileInput" type="file" accept="image/*" multiple>
+        <label class="option-line" for="colorOcrStrength">
+          <span>色付き文字の検出強度</span>
+          <select id="colorOcrStrength">
+            <option value="weak">弱</option>
+            <option value="medium">中</option>
+            <option value="strong" selected>強</option>
+          </select>
+        </label>
         <div class="toolbar">
           <button id="runButton" type="button">実行</button>
           <button id="clearButton" class="secondary" type="button">選択解除</button>
@@ -519,6 +702,7 @@ def build_index_html() -> str:
     const previewGrid = document.getElementById('previewGrid');
     const message = document.getElementById('message');
     const targets = document.getElementById('targets');
+    const colorOcrStrength = document.getElementById('colorOcrStrength');
     const runButton = document.getElementById('runButton');
     const clearButton = document.getElementById('clearButton');
     let selectedFiles = [];
@@ -639,6 +823,7 @@ def build_index_html() -> str:
 
       const formData = new FormData();
       formData.append('targets', targetText);
+      formData.append('color_ocr_strength', colorOcrStrength.value);
       selectedFiles.forEach(file => formData.append('images', file, file.name));
 
       runButton.disabled = true;
@@ -747,7 +932,7 @@ class MaskAppHandler(BaseHTTPRequestHandler):
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(content_length)
-            raw_targets, upload_tasks = parse_multipart_form(self.headers, body)
+            raw_targets, color_ocr_strength, upload_tasks = parse_multipart_form(self.headers, body)
             targets = parse_targets(raw_targets)
             if not targets:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": "黒塗り対象文字列が空白です。実行しません。"})
@@ -756,9 +941,9 @@ class MaskAppHandler(BaseHTTPRequestHandler):
             OUTPUT_DIR.mkdir(exist_ok=True)
             errors: list[str] = []
             if upload_tasks:
-                results, errors = self.process_uploads(upload_tasks, targets)
+                results, errors = self.process_uploads(upload_tasks, targets, color_ocr_strength)
             else:
-                results = [process_default_input(targets)]
+                results = [process_default_input(targets, color_ocr_strength)]
 
             self.send_json(
                 HTTPStatus.OK,
@@ -776,6 +961,7 @@ class MaskAppHandler(BaseHTTPRequestHandler):
         self,
         uploads: list[tuple[bytes, str]],
         targets: list[str],
+        color_ocr_strength: str,
     ) -> tuple[list[dict[str, str]], list[str]]:
         worker_count = min(MAX_WORKERS, len(uploads))
         results: list[dict[str, str]] = []
@@ -783,7 +969,7 @@ class MaskAppHandler(BaseHTTPRequestHandler):
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [
-                executor.submit(process_image_bytes, data, filename, targets)
+                executor.submit(process_image_bytes, data, filename, targets, color_ocr_strength)
                 for data, filename in uploads
             ]
             for future in as_completed(futures):
@@ -837,10 +1023,23 @@ def close_existing_app_servers(port_start: int = 8765, port_end: int = 8865) -> 
         pass
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="文字列黒塗りブラウザアプリ")
+    parser.add_argument("--port-start", type=int, default=8765, help="探索を開始するポート番号")
+    parser.add_argument(
+        "--keep-existing",
+        action="store_true",
+        help="既存の同一アプリサーバーを停止せず、別ポートで追加起動します",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     OUTPUT_DIR.mkdir(exist_ok=True)
-    close_existing_app_servers()
-    port = find_free_port()
+    if not args.keep_existing:
+        close_existing_app_servers()
+    port = find_free_port(args.port_start)
     server = ThreadingHTTPServer(("127.0.0.1", port), MaskAppHandler)
     url = f"http://127.0.0.1:{port}/"
     print(f"ブラウザアプリを起動しました: {url}")
