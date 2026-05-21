@@ -283,6 +283,11 @@ def mask_specific_words(
     return mask
 
 
+def to_grayscale_bgr(image: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
 def build_output_names(original_name: str) -> tuple[str, str]:
     safe_name = safe_filename(original_name)
     path = Path(safe_name)
@@ -294,18 +299,27 @@ def process_image_bytes(
     original_name: str,
     target_list: list[str],
     color_ocr_strength: str = "strong",
+    grayscale_enabled: bool = False,
+    output_image_mode: str = "original",
 ) -> dict[str, str]:
     image_array = np.frombuffer(data, dtype=np.uint8)
     image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError(f"{original_name} を画像として読み込めませんでした。")
 
-    mask = mask_specific_words(image, target_list, color_ocr_strength)
+    ocr_image = to_grayscale_bgr(image) if grayscale_enabled else image
+    mask = mask_specific_words(ocr_image, target_list, color_ocr_strength)
     original_output_name, mask_output_name = build_output_names(original_name)
     original_output_path = OUTPUT_DIR / original_output_name
     mask_output_path = OUTPUT_DIR / mask_output_name
 
-    original_output_path.write_bytes(data)
+    if output_image_mode == "grayscale":
+        ok, encoded = cv2.imencode(Path(original_output_name).suffix or ".png", ocr_image)
+        if not ok:
+            raise RuntimeError(f"{original_output_name} の書き出しに失敗しました。")
+        original_output_path.write_bytes(encoded.tobytes())
+    else:
+        original_output_path.write_bytes(data)
     if not cv2.imwrite(str(mask_output_path), mask):
         raise RuntimeError(f"{mask_output_name} の保存に失敗しました。")
 
@@ -321,10 +335,19 @@ def process_image_bytes(
 def process_default_input(
     target_list: list[str],
     color_ocr_strength: str = "strong",
+    grayscale_enabled: bool = False,
+    output_image_mode: str = "original",
 ) -> dict[str, str]:
     if not DEFAULT_INPUT.exists():
         raise FileNotFoundError(f"デフォルト画像が見つかりません: {DEFAULT_INPUT}")
-    return process_image_bytes(DEFAULT_INPUT.read_bytes(), DEFAULT_INPUT.name, target_list, color_ocr_strength)
+    return process_image_bytes(
+        DEFAULT_INPUT.read_bytes(),
+        DEFAULT_INPUT.name,
+        target_list,
+        color_ocr_strength,
+        grayscale_enabled,
+        output_image_mode,
+    )
 
 
 def make_zip(results: list[dict[str, str]]) -> str | None:
@@ -341,7 +364,7 @@ def make_zip(results: list[dict[str, str]]) -> str | None:
     return f"/outputs/{quote(zip_name)}"
 
 
-def parse_multipart_form(headers: Any, body: bytes) -> tuple[str, str, list[tuple[bytes, str]]]:
+def parse_multipart_form(headers: Any, body: bytes) -> tuple[str, str, bool, str, list[tuple[bytes, str]]]:
     content_type = headers.get("Content-Type", "")
     if not content_type.startswith("multipart/form-data"):
         raise ValueError("multipart/form-data 形式で送信してください。")
@@ -354,6 +377,8 @@ def parse_multipart_form(headers: Any, body: bytes) -> tuple[str, str, list[tupl
     message = BytesParser(policy=email_policy).parsebytes(raw_message)
     target_text = ""
     color_ocr_strength = "strong"
+    grayscale_enabled = False
+    output_image_mode = "original"
     uploads: list[tuple[bytes, str]] = []
 
     for part in message.iter_parts():
@@ -376,8 +401,18 @@ def parse_multipart_form(headers: Any, body: bytes) -> tuple[str, str, list[tupl
             filename = part.get_filename()
             if filename and payload:
                 uploads.append((payload, filename))
+            continue
 
-    return target_text, color_ocr_strength, uploads
+        if name == "grayscale_enabled":
+            value = payload.decode("utf-8", errors="replace").strip().lower()
+            grayscale_enabled = value in {"1", "true", "on", "yes"}
+            continue
+
+        if name == "output_image_mode":
+            value = payload.decode("utf-8", errors="replace").strip().lower()
+            output_image_mode = value if value in {"original", "grayscale"} else "original"
+
+    return target_text, color_ocr_strength, grayscale_enabled, output_image_mode, uploads
 
 
 def build_index_html() -> str:
@@ -506,6 +541,11 @@ def build_index_html() -> str:
       color: #1e2528;
       padding: 7px 9px;
       font: inherit;
+    }}
+    .option-line input[type=checkbox] {{
+      width: 16px;
+      height: 16px;
+      accent-color: #20302e;
     }}
     button {{
       appearance: none;
@@ -679,6 +719,17 @@ def build_index_html() -> str:
             <option value="strong" selected>強</option>
           </select>
         </label>
+        <label class="option-line" for="grayscaleEnabled">
+          <input id="grayscaleEnabled" type="checkbox">
+          <span>実行時にモノクロ変換してからOCRを行う</span>
+        </label>
+        <label class="option-line">
+          <span>出力画像</span>
+          <input type="radio" id="outputModeOriginal" name="outputImageMode" value="original" checked required>
+          <span>元画像</span>
+          <input type="radio" id="outputModeGrayscale" name="outputImageMode" value="grayscale" required>
+          <span>モノクロ画像</span>
+        </label>
         <div class="toolbar">
           <button id="runButton" type="button">実行</button>
           <button id="clearButton" class="secondary" type="button">選択解除</button>
@@ -703,6 +754,7 @@ def build_index_html() -> str:
     const message = document.getElementById('message');
     const targets = document.getElementById('targets');
     const colorOcrStrength = document.getElementById('colorOcrStrength');
+    const grayscaleEnabled = document.getElementById('grayscaleEnabled');
     const runButton = document.getElementById('runButton');
     const clearButton = document.getElementById('clearButton');
     let selectedFiles = [];
@@ -725,13 +777,24 @@ def build_index_html() -> str:
       }}
     }}
 
-    function addFiles(files) {{
-      selectedFiles = [...selectedFiles, ...Array.from(files).filter(file => file.type.startsWith('image/'))];
+    async function addFiles(files) {{
+      const imageFiles = Array.from(files).filter(file => file.type.startsWith('image/'));
+      if (!imageFiles.length) {{
+        renderFiles();
+        return;
+      }}
+      selectedFiles = [...selectedFiles, ...imageFiles];
       renderFiles();
     }}
 
     dropzone.addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', event => addFiles(event.target.files));
+    fileInput.addEventListener('change', async event => {{
+      try {{
+        await addFiles(event.target.files);
+      }} catch (error) {{
+        setMessage(error.message || 'ファイル追加に失敗しました。', true);
+      }}
+    }});
 
     ['dragenter', 'dragover'].forEach(type => {{
       dropzone.addEventListener(type, event => {{
@@ -747,7 +810,13 @@ def build_index_html() -> str:
       }});
     }});
 
-    dropzone.addEventListener('drop', event => addFiles(event.dataTransfer.files));
+    dropzone.addEventListener('drop', async event => {{
+      try {{
+        await addFiles(event.dataTransfer.files);
+      }} catch (error) {{
+        setMessage(error.message || 'ファイル追加に失敗しました。', true);
+      }}
+    }});
 
     clearButton.addEventListener('click', () => {{
       selectedFiles = [];
@@ -824,6 +893,13 @@ def build_index_html() -> str:
       const formData = new FormData();
       formData.append('targets', targetText);
       formData.append('color_ocr_strength', colorOcrStrength.value);
+      formData.append('grayscale_enabled', String(grayscaleEnabled.checked));
+      const outputMode = document.querySelector('input[name="outputImageMode"]:checked');
+      if (!outputMode) {{
+        setMessage('出力画像の設定を選択してください。', true);
+        return;
+      }}
+      formData.append('output_image_mode', outputMode.value);
       selectedFiles.forEach(file => formData.append('images', file, file.name));
 
       runButton.disabled = true;
@@ -932,7 +1008,7 @@ class MaskAppHandler(BaseHTTPRequestHandler):
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(content_length)
-            raw_targets, color_ocr_strength, upload_tasks = parse_multipart_form(self.headers, body)
+            raw_targets, color_ocr_strength, grayscale_enabled, output_image_mode, upload_tasks = parse_multipart_form(self.headers, body)
             targets = parse_targets(raw_targets)
             if not targets:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": "黒塗り対象文字列が空白です。実行しません。"})
@@ -941,9 +1017,15 @@ class MaskAppHandler(BaseHTTPRequestHandler):
             OUTPUT_DIR.mkdir(exist_ok=True)
             errors: list[str] = []
             if upload_tasks:
-                results, errors = self.process_uploads(upload_tasks, targets, color_ocr_strength)
+                results, errors = self.process_uploads(
+                    upload_tasks,
+                    targets,
+                    color_ocr_strength,
+                    grayscale_enabled,
+                    output_image_mode,
+                )
             else:
-                results = [process_default_input(targets, color_ocr_strength)]
+                results = [process_default_input(targets, color_ocr_strength, grayscale_enabled, output_image_mode)]
 
             self.send_json(
                 HTTPStatus.OK,
@@ -962,6 +1044,8 @@ class MaskAppHandler(BaseHTTPRequestHandler):
         uploads: list[tuple[bytes, str]],
         targets: list[str],
         color_ocr_strength: str,
+        grayscale_enabled: bool,
+        output_image_mode: str,
     ) -> tuple[list[dict[str, str]], list[str]]:
         worker_count = min(MAX_WORKERS, len(uploads))
         results: list[dict[str, str]] = []
@@ -969,7 +1053,15 @@ class MaskAppHandler(BaseHTTPRequestHandler):
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [
-                executor.submit(process_image_bytes, data, filename, targets, color_ocr_strength)
+                executor.submit(
+                    process_image_bytes,
+                    data,
+                    filename,
+                    targets,
+                    color_ocr_strength,
+                    grayscale_enabled,
+                    output_image_mode,
+                )
                 for data, filename in uploads
             ]
             for future in as_completed(futures):
