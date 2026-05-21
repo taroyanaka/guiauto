@@ -13,6 +13,7 @@
 *.tif
 *.tiff
 *.webp
+*.zip
 
 masked_outputs/
 __pycache__/
