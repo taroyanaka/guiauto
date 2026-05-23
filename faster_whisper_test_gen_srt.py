@@ -1,11 +1,3 @@
-######## whisperのモデルダウンロード ########
-# from faster_whisper import WhisperModel
-#
-# model = WhisperModel("large-v3")
-#
-# print("モデルDL完了")
-#############################################
-
 from faster_whisper import WhisperModel
 
 # =========================
@@ -18,9 +10,18 @@ model = WhisperModel(
     compute_type="int8"
 )
 
+# 【機能追加】
+# vad_filter=True を設定し、オススメのパラメータを指定
+# これにより、無音部分のノイズによるハルシネーション（誤作動）を防ぎつつ、
+# 字幕が不自然に1つなぎになったり細切れになったりするのを防ぎます。
 segments, info = model.transcribe(
     "input.mp4",
-    language="ja"
+    language="ja",
+    vad_filter=True,
+    vad_parameters=dict(
+        threshold=0.5,              # 音声とみなす確率のしきい値（デフォルト: 0.5）
+        min_silence_duration_ms=500 # 0.5秒（500ms）以上の無音区間を適切に処理
+    )
 )
 
 # generator を全部読み切る
