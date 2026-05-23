@@ -38,12 +38,18 @@ function startScrolling(delaySec, speedPxPerSec) {
   window.autoScrollTimeout = setTimeout(() => {
     const intervalMs = 20; 
     const pxPerInterval = speedPxPerSec * (intervalMs / 1000);
+    let accumulatedScroll = 0;
     
     window.autoScrollInterval = setInterval(() => {
-      window.scrollBy(0, pxPerInterval);
+      accumulatedScroll += pxPerInterval;
+      if (accumulatedScroll >= 1) {
+        const scrollAmount = Math.floor(accumulatedScroll);
+        window.scrollBy(0, scrollAmount);
+        accumulatedScroll -= scrollAmount;
+      }
       
       // Stop if reached the bottom
-      if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight) {
+      if ((window.innerHeight + Math.ceil(window.scrollY)) >= document.body.offsetHeight) {
         clearInterval(window.autoScrollInterval);
       }
     }, intervalMs);
