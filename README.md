@@ -1,6 +1,7 @@
 notguiautomationディレクトリには作成途中orアプリ化する必要が無いスクリプトを保存
 
 exe化のサンプル
+python -m PyInstaller --onefile --noconsole --name "AutoPasteApp" --clean ./onetap.py
 python -m PyInstaller --onefile --noconsole --icon=robloxpub.ico --name"RobloxPublish" --clean .\roblox_publish.py
 
 注意点: pngなどを.ico(拡張子はiconではなくico)に変換して
