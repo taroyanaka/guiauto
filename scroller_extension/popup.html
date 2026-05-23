@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { width: 200px; padding: 10px; font-family: sans-serif; }
+    div { margin-bottom: 10px; }
+    input { width: 50px; }
+    button { width: 100%; padding: 5px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div>
+    <label>Delay (sec):</label>
+    <input type="number" id="delay" value="3" min="0">
+  </div>
+  <div>
+    <label>Speed (px/sec):</label>
+    <input type="number" id="speed" value="50" min="1">
+  </div>
+  <button id="start">Start</button>
+  <button id="stop" style="margin-top: 5px;">Stop</button>
+  <script src="popup.js"></script>
+</body>
+</html>

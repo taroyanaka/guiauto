@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Auto Scroller",
+  "version": "1.0",
+  "description": "Scrolls the page automatically after a delay.",
+  "permissions": ["activeTab", "scripting"],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
