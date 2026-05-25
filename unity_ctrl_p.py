@@ -63,7 +63,11 @@ def _find_unity_windows(title_contains: str):
         try:
             if not w.title:
                 continue
-            if title_contains_lower in w.title.lower():
+            t = w.title.lower()
+            # "Unity" は Unity Hub にも一致しやすいので、既定では Hub を除外する
+            if "unity hub" in t or t.strip() == "unity hub" or t.startswith("unity hub"):
+                continue
+            if title_contains_lower in t:
                 wins.append(w)
         except Exception:
             continue
@@ -105,4 +109,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
