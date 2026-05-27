@@ -1,0 +1,25 @@
+﻿{
+  "manifest_version": 3,
+  "name": "LogAuto Gemini Bridge",
+  "version": "1.0.0",
+  "description": "Record browser actions, send prompts to Gemini Web, and replay generated automation commands.",
+  "permissions": ["sidePanel", "activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": ["https://gemini.google.com/*", "<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "LogAuto Gemini Bridge"
+  }
+}

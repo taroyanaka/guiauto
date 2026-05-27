@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+# 目的
+APIキーを使用せず、Web版のGemini（https://gemini.google.com/）と連携してブラウザ操作を自動化するChrome拡張機能（Manifest V3）を作成してください。
+
+# 動作フロー
+1. 【記録モード】拡張機能がONの時、ユーザーが現在のタブで行ったクリックや文字入力を監視する。
+2. 操作された要素の「ユニークなCSSセレクター」と「その要素の軽量化したHTML（outerHTML）」をログ（JSON）として裏で蓄積する。
+3. 【サイドパネルUI】拡張機能のサイドパネルを開くと、記録されたステップが一覧表示され、最下部に「追加で指示したい処理（例：この後Slackに通知して）」を入力するテキストエリアがある。
+4. 【Gemini連携】「Geminiに投げる」ボタンを押すと、自動的に「https://gemini.google.com/app」のタブが開き、蓄積されたログ＋追加指示を組み合わせたプロンプトを入力欄（contenteditable="true"）に自動で貼り付け、送信ボタンを自動クリック（またはユーザーが手動送信できる状態に）する。
+5. 【実行モード】Geminiが生成したJavaScript（またはJSON形式のコマンド）を、拡張機能のサイドパネルに貼り付けると、対象のタブでそのステップが自動実行される。
+
+# 必要となるファイル構成
+全て最新のJavaScript (ES6+) を使用し、外部サーバーや外部ライブラリ（Puppeteer等）は一切使わず、拡張機能単体（サーバーレス）で完結させてください。
+    -->
+    <title>LogAuto Gemini Bridge</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f7fb;
+        --panel: #ffffff;
+        --panel-2: #eef3f9;
+        --border: #d6deea;
+        --text: #122033;
+        --muted: #5f6f84;
+        --accent: #1456ff;
+        --accent-2: #0e3bb3;
+        --danger: #b42318;
+        --shadow: 0 18px 45px rgba(18, 32, 51, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top left, rgba(20, 86, 255, 0.12), transparent 34%),
+          radial-gradient(circle at 90% 10%, rgba(14, 59, 179, 0.08), transparent 24%),
+          var(--bg);
+      }
+
+      .shell {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        min-height: 100vh;
+        padding: 14px;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        box-shadow: var(--shadow);
+      }
+
+      .header {
+        padding: 16px;
+      }
+
+      .title-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: flex-start;
+      }
+
+      h1 {
+        font-size: 18px;
+        line-height: 1.2;
+        margin: 0 0 6px;
+      }
+
+      .subtitle {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 10px;
+        border-radius: 999px;
+        background: var(--panel-2);
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #2cb67d;
+      }
+
+      .controls {
+        display: grid;
+        gap: 12px;
+      }
+
+      .toggle {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 14px;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: #fbfcfe;
+      }
+
+      .toggle strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 14px;
+      }
+
+      .toggle span {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .switch {
+        position: relative;
+        width: 54px;
+        height: 30px;
+        flex: 0 0 auto;
+      }
+
+      .switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .slider {
+        position: absolute;
+        inset: 0;
+        cursor: pointer;
+        background: #c8d3e2;
+        border-radius: 999px;
+        transition: 0.2s ease;
+      }
+
+      .slider::before {
+        content: "";
+        position: absolute;
+        left: 4px;
+        top: 4px;
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        background: white;
+        box-shadow: 0 2px 8px rgba(18, 32, 51, 0.18);
+        transition: 0.2s ease;
+      }
+
+      .switch input:checked + .slider {
+        background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      }
+
+      .switch input:checked + .slider::before {
+        transform: translateX(24px);
+      }
+
+      textarea,
+      input[type="text"] {
+        width: 100%;
+        border-radius: 14px;
+        border: 1px solid var(--border);
+        background: #fff;
+        color: var(--text);
+        padding: 12px 14px;
+        font: inherit;
+        resize: vertical;
+      }
+
+      textarea:focus,
+      input[type="text"]:focus {
+        outline: 2px solid rgba(20, 86, 255, 0.18);
+        border-color: var(--accent);
+      }
+
+      .section {
+        padding: 16px;
+      }
+
+      .section h2 {
+        margin: 0 0 10px;
+        font-size: 14px;
+      }
+
+      .section p {
+        margin: 0 0 10px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .steps {
+        display: grid;
+        gap: 10px;
+        max-height: 250px;
+        overflow: auto;
+        padding-right: 4px;
+      }
+
+      .step {
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: #fff;
+        padding: 10px 12px;
+      }
+
+      .step-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 6px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .step code {
+        display: block;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--text);
+      }
+
+      .meta {
+        margin-top: 6px;
+        font-size: 11px;
+        color: var(--muted);
+        white-space: pre-wrap;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      button {
+        appearance: none;
+        border: none;
+        border-radius: 12px;
+        padding: 11px 14px;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+        transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+      }
+
+      .primary {
+        background: linear-gradient(90deg, var(--accent), var(--accent-2));
+        color: #fff;
+        box-shadow: 0 10px 24px rgba(20, 86, 255, 0.24);
+      }
+
+      .secondary {
+        background: #e9eef8;
+        color: var(--text);
+      }
+
+      .danger {
+        background: #fdecec;
+        color: var(--danger);
+      }
+
+      .status {
+        min-height: 20px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .grid {
+        display: grid;
+        gap: 12px;
+      }
+
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="card header">
+        <div class="title-row">
+          <div>
+            <h1>LogAuto Gemini Bridge</h1>
+            <p class="subtitle">操作を記録して、Geminiへ渡し、返ってきた実行コードも再生できます。</p>
+          </div>
+          <div class="badge"><span class="dot"></span><span id="stepCount">0 steps</span></div>
+        </div>
+      </div>
+
+      <div class="card section controls">
+        <div class="toggle">
+          <div>
+            <strong>記録モード</strong>
+            <span>現在のタブでのクリックと入力を収集します。</span>
+          </div>
+          <label class="switch" title="記録モードのON/OFF">
+            <input id="recordingToggle" type="checkbox" checked />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div>
+          <h2>追加の指示</h2>
+          <textarea id="extraInstruction" rows="4" placeholder="例: この後Slackに通知して"></textarea>
+        </div>
+
+        <div class="actions">
+          <button id="sendToGemini" class="primary">Geminiに投げる</button>
+          <button id="refresh" class="secondary">再読み込み</button>
+          <button id="clearSteps" class="danger">ログを消去</button>
+        </div>
+
+        <div class="status" id="status"></div>
+      </div>
+
+      <div class="card section">
+        <h2>記録されたステップ</h2>
+        <p>最新の操作が上に表示されます。</p>
+        <div id="steps" class="steps"></div>
+      </div>
+
+      <div class="card section grid">
+        <div>
+          <h2>Gemini向け最終プロンプト</h2>
+          <textarea id="finalPrompt" class="mono" rows="12" readonly></textarea>
+        </div>
+
+        <div>
+          <h2>Gemini出力の貼り付け</h2>
+          <p>JavaScriptコードブロック、JSONコマンド、またはそのままのコードを貼り付けて実行します。</p>
+          <textarea id="executionPayload" class="mono" rows="12" placeholder="Geminiが返したコードやJSONを貼り付けてください"></textarea>
+        </div>
+
+        <div class="actions">
+          <button id="runPayload" class="primary">実行する</button>
+          <button id="loadExample" class="secondary">JSON例を入れる</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>
