@@ -6,8 +6,8 @@ import json
 import mimetypes
 import os
 import msvcrt
-from dataclasses import dataclass
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -20,16 +20,28 @@ from mask_text_in_image import OUTPUT_DIR, process_image_bytes
 API_FETCH_TASK = "/api/fetch-task"
 API_UPLOAD_RESULT = "/api/upload-result"
 DEFAULT_BASE_URL = "https://ez-server-d7h7.onrender.com"
-DEFAULT_USER_ID = "user2"
-DEFAULT_PASSWORD = "4287"
-DEFAULT_TARGETS_FILE = Path(__file__).with_name("targets.txt")
-LOCK_FILE = OUTPUT_DIR / "mask_text_in_image2.lock"
+DEFAULT_CREDENTIALS_FILE = Path(__file__).with_name("user_credentials.txt")
+DEFAULT_TARGETS_DIR = Path(__file__).parent
+LOCK_FILE = OUTPUT_DIR / "mask_text_in_image3.lock"
 
 
 @dataclass
 class TaskItem:
     task_id: str
     original_url: str
+
+
+@dataclass
+class UserAccount:
+    user_id: str
+    password: str
+
+    @property
+    def targets_file(self) -> Path:
+        suffix = "".join(ch for ch in self.user_id if ch.isdigit())
+        if not suffix:
+            raise ValueError(f"user_id has no numeric suffix: {self.user_id}")
+        return DEFAULT_TARGETS_DIR / f"targets_user{suffix}.txt"
 
 
 def ensure_output_dir() -> None:
@@ -71,9 +83,26 @@ def load_target_words(targets_file: Path) -> list[str]:
         if word:
             words.append(word)
 
-    if not words:
-        raise ValueError(f"targets file is empty: {targets_file}")
     return words
+
+
+def load_accounts(credentials_file: Path) -> list[UserAccount]:
+    if not credentials_file.exists():
+        raise FileNotFoundError(f"credentials file not found: {credentials_file}")
+
+    accounts: list[UserAccount] = []
+    for line_number, line in enumerate(credentials_file.read_text(encoding="utf-8").splitlines(), start=1):
+        raw = line.strip()
+        if not raw or raw.startswith("#"):
+            continue
+        parts = [part.strip() for part in raw.split(",", 1)]
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise ValueError(f"invalid credentials format at line {line_number}: {raw}")
+        accounts.append(UserAccount(user_id=parts[0], password=parts[1]))
+
+    if not accounts:
+        raise ValueError(f"credentials file is empty: {credentials_file}")
+    return accounts
 
 
 def build_headers(user_id: str, password: str) -> dict[str, str]:
@@ -91,7 +120,7 @@ def parse_json_response(data: bytes) -> Any:
 def fetch_tasks(base_url: str, user_id: str, password: str) -> list[TaskItem]:
     query = urlencode({"user_id": user_id, "password": password})
     url = f"{base_url.rstrip('/')}{API_FETCH_TASK}?{query}"
-    print(f"[INFO] fetching tasks from {url}")
+    print(f"[INFO] fetching tasks for {user_id} from {url}")
     request = Request(url, headers=build_headers(user_id, password), method="GET")
     with urlopen(request, timeout=60) as response:
         payload = parse_json_response(response.read())
@@ -132,7 +161,7 @@ def upload_result(
     task_id: str,
     mask_path: Path,
 ) -> dict[str, Any]:
-    print(f"[INFO] uploading mask for task_id={task_id}")
+    print(f"[INFO] uploading mask for task_id={task_id} as {user_id}")
     boundary = f"----MaskTextBoundary{os.urandom(12).hex()}"
     body = bytearray()
 
@@ -168,19 +197,18 @@ def upload_result(
 
 def process_task(
     base_url: str,
-    user_id: str,
-    password: str,
+    account: UserAccount,
     task: TaskItem,
     target_words: list[str],
     color_ocr_strength: str,
     grayscale_enabled: bool,
     output_image_mode: str,
 ) -> None:
-    print(f"[INFO] task_id={task.task_id} start")
+    print(f"[INFO] user={account.user_id} task_id={task.task_id} start")
     image_bytes, content_type = download_image(task.original_url)
     extension = guess_extension(task.original_url, content_type)
-    original_name = f"task_{task.task_id}{extension}"
-    print(f"[INFO] task_id={task.task_id} generating mask as {original_name}")
+    original_name = f"{account.user_id}_task_{task.task_id}{extension}"
+    print(f"[INFO] user={account.user_id} task_id={task.task_id} generating mask as {original_name}")
     result = process_image_bytes(
         image_bytes,
         original_name,
@@ -191,22 +219,21 @@ def process_task(
     )
 
     mask_path = OUTPUT_DIR / result["mask"]
-    response = upload_result(base_url, user_id, password, task.task_id, mask_path)
-    print(f"[INFO] task_id={task.task_id} upload complete")
+    response = upload_result(base_url, account.user_id, account.password, task.task_id, mask_path)
+    print(f"[INFO] user={account.user_id} task_id={task.task_id} upload complete")
     print(
-        f"[OK] task_id={task.task_id} original={task.original_url} "
+        f"[OK] user={account.user_id} task_id={task.task_id} original={task.original_url} "
         f"mask={response.get('item', {}).get('mask', result['mask'])}"
     )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch tasks, generate mask images, and upload results.")
+    parser = argparse.ArgumentParser(description="Process tasks per user and upload masks.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="API base URL")
-    parser.add_argument("--user-id", default=os.getenv("MASK_USER_ID", DEFAULT_USER_ID), help="API user_id")
     parser.add_argument(
-        "--password",
-        default=os.getenv("MASK_PASSWORD", DEFAULT_PASSWORD),
-        help="API password",
+        "--credentials-file",
+        default=str(DEFAULT_CREDENTIALS_FILE),
+        help="Path to comma-separated user_id/password credentials file",
     )
     parser.add_argument(
         "--color-ocr-strength",
@@ -225,73 +252,87 @@ def parse_args() -> argparse.Namespace:
         choices=("original", "grayscale"),
         help="Store original image or grayscale variant locally",
     )
-    parser.add_argument(
-        "--targets-file",
-        default=str(DEFAULT_TARGETS_FILE),
-        help="Path to the text file containing mask target words",
-    )
     return parser.parse_args()
+
+
+def process_user(base_url: str, account: UserAccount, args: argparse.Namespace) -> int:
+    try:
+        target_words = load_target_words(account.targets_file)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[ERROR] user={account.user_id} {exc}")
+        return 1
+
+    if not target_words:
+        print(f"[INFO] user={account.user_id} targets file is empty, skipping user")
+        return 0
+
+    print(f"[INFO] user={account.user_id} using targets file {account.targets_file}")
+
+    total_failures = 0
+    while True:
+        try:
+            tasks = fetch_tasks(base_url, account.user_id, account.password)
+        except (HTTPError, URLError, json.JSONDecodeError) as exc:
+            print(f"[ERROR] user={account.user_id} failed to fetch tasks: {exc}")
+            return total_failures + 1
+
+        if not tasks:
+            print(f"[INFO] user={account.user_id} no pending tasks")
+            break
+
+        print(f"[INFO] user={account.user_id} fetched {len(tasks)} task(s)")
+        for index, task in enumerate(tasks, start=1):
+            try:
+                print(f"[INFO] user={account.user_id} processing {index}/{len(tasks)} task_id={task.task_id}")
+                process_task(
+                    base_url,
+                    account,
+                    task,
+                    target_words,
+                    args.color_ocr_strength,
+                    args.grayscale_enabled,
+                    args.output_image_mode,
+                )
+            except HTTPError as exc:
+                total_failures += 1
+                print(f"[ERROR] user={account.user_id} task_id={task.task_id} http_error={exc.code} {exc.reason}")
+                if exc.fp is not None:
+                    try:
+                        error_body = exc.fp.read().decode("utf-8", errors="replace")
+                        if error_body:
+                            print(f"[ERROR] user={account.user_id} task_id={task.task_id} response={error_body}")
+                    except Exception:
+                        pass
+            except URLError as exc:
+                total_failures += 1
+                print(f"[ERROR] user={account.user_id} task_id={task.task_id} url_error={exc.reason}")
+            except Exception as exc:
+                total_failures += 1
+                print(f"[ERROR] user={account.user_id} task_id={task.task_id} {exc}")
+
+    print(f"[INFO] user={account.user_id} completed with {total_failures} failure(s)")
+    return total_failures
 
 
 def main() -> int:
     args = parse_args()
-    if not args.user_id or not args.password:
-        print("ERROR: --user-id and --password are required, or set MASK_USER_ID / MASK_PASSWORD.")
-        return 1
-
     ensure_output_dir()
+
     try:
         with single_instance_lock(LOCK_FILE):
             try:
-                target_words = load_target_words(Path(args.targets_file))
+                accounts = load_accounts(Path(args.credentials_file))
             except (FileNotFoundError, ValueError) as exc:
                 print(f"ERROR: {exc}")
                 return 1
 
-            try:
-                tasks = fetch_tasks(args.base_url, args.user_id, args.password)
-            except (HTTPError, URLError, json.JSONDecodeError) as exc:
-                print(f"ERROR: failed to fetch tasks: {exc}")
-                return 1
+            print(f"[INFO] loaded {len(accounts)} user account(s)")
+            total_failures = 0
+            for account in accounts:
+                total_failures += process_user(args.base_url, account, args)
 
-            if not tasks:
-                print("[INFO] no pending tasks")
-                return 0
-
-            print(f"[INFO] fetched {len(tasks)} task(s)")
-            failures = 0
-            for index, task in enumerate(tasks, start=1):
-                try:
-                    print(f"[INFO] processing {index}/{len(tasks)} task_id={task.task_id}")
-                    process_task(
-                        args.base_url,
-                        args.user_id,
-                        args.password,
-                        task,
-                        target_words,
-                        args.color_ocr_strength,
-                        args.grayscale_enabled,
-                        args.output_image_mode,
-                    )
-                except HTTPError as exc:
-                    failures += 1
-                    print(f"[ERROR] task_id={task.task_id} http_error={exc.code} {exc.reason}")
-                    if exc.fp is not None:
-                        try:
-                            error_body = exc.fp.read().decode("utf-8", errors="replace")
-                            if error_body:
-                                print(f"[ERROR] task_id={task.task_id} response={error_body}")
-                        except Exception:
-                            pass
-                except URLError as exc:
-                    failures += 1
-                    print(f"[ERROR] task_id={task.task_id} url_error={exc.reason}")
-                except Exception as exc:
-                    failures += 1
-                    print(f"[ERROR] task_id={task.task_id} {exc}")
-
-            print(f"[INFO] completed with {failures} failure(s)")
-            return 0 if failures == 0 else 2
+            print(f"[INFO] completed with {total_failures} total failure(s)")
+            return 0 if total_failures == 0 else 2
     except RuntimeError as exc:
         print(f"[INFO] {exc}")
         return 0
