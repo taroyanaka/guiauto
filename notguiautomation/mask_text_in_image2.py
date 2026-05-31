@@ -12,12 +12,15 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from mask_text_in_image import OUTPUT_DIR, TARGET_WORDS_DEFAULT, process_image_bytes
+from mask_text_in_image import OUTPUT_DIR, process_image_bytes
 
 
 API_FETCH_TASK = "/api/fetch-task"
 API_UPLOAD_RESULT = "/api/upload-result"
-DEFAULT_BASE_URL = "http://127.0.0.1:3000"
+DEFAULT_BASE_URL = "https://ez-server-d7h7.onrender.com"
+DEFAULT_USER_ID = "user2"
+DEFAULT_PASSWORD = "4287"
+DEFAULT_TARGETS_FILE = Path(__file__).with_name("targets.txt")
 
 
 @dataclass
@@ -28,6 +31,21 @@ class TaskItem:
 
 def ensure_output_dir() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_target_words(targets_file: Path) -> list[str]:
+    if not targets_file.exists():
+        raise FileNotFoundError(f"targets file not found: {targets_file}")
+
+    words: list[str] = []
+    for line in targets_file.read_text(encoding="utf-8").splitlines():
+        word = line.strip()
+        if word:
+            words.append(word)
+
+    if not words:
+        raise ValueError(f"targets file is empty: {targets_file}")
+    return words
 
 
 def build_headers(user_id: str, password: str) -> dict[str, str]:
@@ -45,6 +63,7 @@ def parse_json_response(data: bytes) -> Any:
 def fetch_tasks(base_url: str, user_id: str, password: str) -> list[TaskItem]:
     query = urlencode({"user_id": user_id, "password": password})
     url = f"{base_url.rstrip('/')}{API_FETCH_TASK}?{query}"
+    print(f"[INFO] fetching tasks from {url}")
     request = Request(url, headers=build_headers(user_id, password), method="GET")
     with urlopen(request, timeout=60) as response:
         payload = parse_json_response(response.read())
@@ -60,6 +79,7 @@ def fetch_tasks(base_url: str, user_id: str, password: str) -> list[TaskItem]:
 
 
 def download_image(url: str) -> tuple[bytes, str]:
+    print(f"[INFO] downloading image: {url}")
     request = Request(url, headers={"User-Agent": "Mozilla/5.0"}, method="GET")
     with urlopen(request, timeout=120) as response:
         data = response.read()
@@ -84,6 +104,7 @@ def upload_result(
     task_id: str,
     mask_path: Path,
 ) -> dict[str, Any]:
+    print(f"[INFO] uploading mask for task_id={task_id}")
     boundary = f"----MaskTextBoundary{os.urandom(12).hex()}"
     body = bytearray()
 
@@ -127,9 +148,11 @@ def process_task(
     grayscale_enabled: bool,
     output_image_mode: str,
 ) -> None:
+    print(f"[INFO] task_id={task.task_id} start")
     image_bytes, content_type = download_image(task.original_url)
     extension = guess_extension(task.original_url, content_type)
     original_name = f"task_{task.task_id}{extension}"
+    print(f"[INFO] task_id={task.task_id} generating mask as {original_name}")
     result = process_image_bytes(
         image_bytes,
         original_name,
@@ -141,6 +164,7 @@ def process_task(
 
     mask_path = OUTPUT_DIR / result["mask"]
     response = upload_result(base_url, user_id, password, task.task_id, mask_path)
+    print(f"[INFO] task_id={task.task_id} upload complete")
     print(
         f"[OK] task_id={task.task_id} original={task.original_url} "
         f"mask={response.get('item', {}).get('mask', result['mask'])}"
@@ -150,8 +174,12 @@ def process_task(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fetch tasks, generate mask images, and upload results.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="API base URL")
-    parser.add_argument("--user-id", default=os.getenv("MASK_USER_ID", ""), help="API user_id")
-    parser.add_argument("--password", default=os.getenv("MASK_PASSWORD", ""), help="API password")
+    parser.add_argument("--user-id", default=os.getenv("MASK_USER_ID", DEFAULT_USER_ID), help="API user_id")
+    parser.add_argument(
+        "--password",
+        default=os.getenv("MASK_PASSWORD", DEFAULT_PASSWORD),
+        help="API password",
+    )
     parser.add_argument(
         "--color-ocr-strength",
         default="strong",
@@ -169,6 +197,11 @@ def parse_args() -> argparse.Namespace:
         choices=("original", "grayscale"),
         help="Store original image or grayscale variant locally",
     )
+    parser.add_argument(
+        "--targets-file",
+        default=str(DEFAULT_TARGETS_FILE),
+        help="Path to the text file containing mask target words",
+    )
     return parser.parse_args()
 
 
@@ -179,6 +212,12 @@ def main() -> int:
         return 1
 
     ensure_output_dir()
+    try:
+        target_words = load_target_words(Path(args.targets_file))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"ERROR: {exc}")
+        return 1
+
     try:
         tasks = fetch_tasks(args.base_url, args.user_id, args.password)
     except (HTTPError, URLError, json.JSONDecodeError) as exc:
@@ -191,14 +230,15 @@ def main() -> int:
 
     print(f"[INFO] fetched {len(tasks)} task(s)")
     failures = 0
-    for task in tasks:
+    for index, task in enumerate(tasks, start=1):
         try:
+            print(f"[INFO] processing {index}/{len(tasks)} task_id={task.task_id}")
             process_task(
                 args.base_url,
                 args.user_id,
                 args.password,
                 task,
-                TARGET_WORDS_DEFAULT,
+                target_words,
                 args.color_ocr_strength,
                 args.grayscale_enabled,
                 args.output_image_mode,
@@ -206,6 +246,13 @@ def main() -> int:
         except HTTPError as exc:
             failures += 1
             print(f"[ERROR] task_id={task.task_id} http_error={exc.code} {exc.reason}")
+            if exc.fp is not None:
+                try:
+                    error_body = exc.fp.read().decode("utf-8", errors="replace")
+                    if error_body:
+                        print(f"[ERROR] task_id={task.task_id} response={error_body}")
+                except Exception:
+                    pass
         except URLError as exc:
             failures += 1
             print(f"[ERROR] task_id={task.task_id} url_error={exc.reason}")
