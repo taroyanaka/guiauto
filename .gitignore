@@ -1,3 +1,5 @@
 *.mp4
 *.srt
 notguiautomation/user_credentials.txt
+notguiautomation/backup.csv
+notguiautomation/targets_user*.txt

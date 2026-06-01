@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import mimetypes
 import os
@@ -19,9 +20,12 @@ from mask_text_in_image import OUTPUT_DIR, process_image_bytes
 
 API_FETCH_TASK = "/api/fetch-task"
 API_UPLOAD_RESULT = "/api/upload-result"
+BACKUP_CSV_URL = "/backup/csv"
 DEFAULT_BASE_URL = "https://ez-server-d7h7.onrender.com"
 DEFAULT_CREDENTIALS_FILE = Path(__file__).with_name("user_credentials.txt")
 DEFAULT_TARGETS_DIR = Path(__file__).parent
+DEFAULT_BACKUP_CSV_FILE = Path(__file__).with_name("backup.csv")
+DEFAULT_TARGETS_TEMPLATE_FILE = Path(__file__).with_name("targets.txt")
 LOCK_FILE = OUTPUT_DIR / "mask_text_in_image3.lock"
 
 
@@ -42,6 +46,13 @@ class UserAccount:
         if not suffix:
             raise ValueError(f"user_id has no numeric suffix: {self.user_id}")
         return DEFAULT_TARGETS_DIR / f"targets_user{suffix}.txt"
+
+
+@dataclass
+class BackupUserRecord:
+    row_id: str
+    user_id: str
+    password: str
 
 
 def ensure_output_dir() -> None:
@@ -84,6 +95,73 @@ def load_target_words(targets_file: Path) -> list[str]:
             words.append(word)
 
     return words
+
+
+def download_backup_csv(base_url: str, backup_csv_url: str, destination: Path) -> Path:
+    url = f"{base_url.rstrip('/')}{backup_csv_url}"
+    print(f"[INFO] downloading backup csv from {url}")
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0"}, method="GET")
+    with urlopen(request, timeout=120) as response:
+        data = response.read()
+    destination.write_bytes(data)
+    return destination
+
+
+def load_backup_users(backup_csv: Path) -> list[BackupUserRecord]:
+    if not backup_csv.exists():
+        raise FileNotFoundError(f"backup csv not found: {backup_csv}")
+
+    rows: list[BackupUserRecord] = []
+    with backup_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        required_fields = {"id", "user_id", "password"}
+        if not reader.fieldnames or not required_fields.issubset(set(reader.fieldnames)):
+            raise ValueError(f"backup csv must include columns: id,user_id,password ({backup_csv})")
+
+        for line_number, row in enumerate(reader, start=2):
+            row_id = (row.get("id") or "").strip()
+            user_id = (row.get("user_id") or "").strip()
+            password = (row.get("password") or "").strip()
+            if not user_id or not password:
+                raise ValueError(f"invalid backup csv row at line {line_number}: {row}")
+            rows.append(BackupUserRecord(row_id=row_id, user_id=user_id, password=password))
+
+    if not rows:
+        raise ValueError(f"backup csv is empty: {backup_csv}")
+    return rows
+
+
+def write_credentials_file(credentials_file: Path, users: list[BackupUserRecord]) -> None:
+    lines = [f"{user.user_id},{user.password}" for user in users]
+    credentials_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"[INFO] updated credentials file: {credentials_file}")
+
+
+def ensure_targets_file(targets_file: Path, template_file: Path) -> bool:
+    if targets_file.exists() and targets_file.stat().st_size > 0:
+        return False
+
+    if not template_file.exists():
+        raise FileNotFoundError(f"targets template file not found: {template_file}")
+
+    template_text = template_file.read_text(encoding="utf-8")
+    targets_file.write_text(template_text, encoding="utf-8")
+    print(f"[INFO] created targets file: {targets_file}")
+    return True
+
+
+def sync_user_files(
+    backup_csv: Path,
+    credentials_file: Path,
+    targets_template_file: Path,
+) -> list[UserAccount]:
+    users = load_backup_users(backup_csv)
+    write_credentials_file(credentials_file, users)
+
+    accounts = [UserAccount(user_id=user.user_id, password=user.password) for user in users]
+    for account in accounts:
+        ensure_targets_file(account.targets_file, targets_template_file)
+    return accounts
 
 
 def load_accounts(credentials_file: Path) -> list[UserAccount]:
@@ -231,9 +309,24 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Process tasks per user and upload masks.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="API base URL")
     parser.add_argument(
+        "--backup-csv-url",
+        default=BACKUP_CSV_URL,
+        help="Relative path for the backup CSV endpoint",
+    )
+    parser.add_argument(
         "--credentials-file",
         default=str(DEFAULT_CREDENTIALS_FILE),
         help="Path to comma-separated user_id/password credentials file",
+    )
+    parser.add_argument(
+        "--backup-csv-file",
+        default=str(DEFAULT_BACKUP_CSV_FILE),
+        help="Local path to save the downloaded backup CSV",
+    )
+    parser.add_argument(
+        "--targets-template-file",
+        default=str(DEFAULT_TARGETS_TEMPLATE_FILE),
+        help="Template file used to seed per-user targets files",
     )
     parser.add_argument(
         "--color-ocr-strength",
@@ -321,7 +414,21 @@ def main() -> int:
     try:
         with single_instance_lock(LOCK_FILE):
             try:
-                accounts = load_accounts(Path(args.credentials_file))
+                backup_csv_path = download_backup_csv(
+                    args.base_url,
+                    args.backup_csv_url,
+                    Path(args.backup_csv_file),
+                )
+            except (HTTPError, URLError) as exc:
+                print(f"ERROR: failed to download backup csv: {exc}")
+                return 1
+
+            try:
+                accounts = sync_user_files(
+                    backup_csv_path,
+                    Path(args.credentials_file),
+                    Path(args.targets_template_file),
+                )
             except (FileNotFoundError, ValueError) as exc:
                 print(f"ERROR: {exc}")
                 return 1
