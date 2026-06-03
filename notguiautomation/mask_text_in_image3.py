@@ -25,7 +25,7 @@ DEFAULT_BASE_URL = "https://ez-server-d7h7.onrender.com"
 DEFAULT_CREDENTIALS_FILE = Path(__file__).with_name("user_credentials.txt")
 DEFAULT_TARGETS_DIR = Path(__file__).parent
 DEFAULT_BACKUP_CSV_FILE = Path(__file__).with_name("backup.csv")
-DEFAULT_TARGETS_TEMPLATE_FILE = Path(__file__).with_name("targets.txt")
+DEFAULT_TARGETS_TEMPLATE_FILE = Path(__file__).with_name("targets_for_mask3.txt")
 LOCK_FILE = OUTPUT_DIR / "mask_text_in_image3.lock"
 
 

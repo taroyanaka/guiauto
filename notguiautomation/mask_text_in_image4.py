@@ -96,6 +96,15 @@ def load_target_words(targets_file: Path) -> list[str]:
     return words
 
 
+def ensure_targets_file(targets_file: Path) -> bool:
+    if targets_file.exists():
+        return False
+
+    targets_file.write_text("", encoding="utf-8")
+    print(f"[INFO] created empty targets file: {targets_file}")
+    return True
+
+
 def write_target_words(targets_file: Path, target_text: str) -> None:
     targets_file.write_text(target_text.replace("\r\n", "\n").replace("\r", "\n"), encoding="utf-8")
     print(f"[INFO] updated targets file: {targets_file}")
@@ -328,6 +337,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def process_user(base_url: str, account: UserAccount, args: argparse.Namespace) -> int:
+    ensure_targets_file(account.targets_file)
     total_failures = 0
 
     while True:

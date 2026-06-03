@@ -22,7 +22,7 @@ API_UPLOAD_RESULT = "/api/upload-result"
 DEFAULT_BASE_URL = "https://ez-server-d7h7.onrender.com"
 DEFAULT_USER_ID = "user2"
 DEFAULT_PASSWORD = "4287"
-DEFAULT_TARGETS_FILE = Path(__file__).with_name("targets.txt")
+DEFAULT_TARGETS_FILE = Path(__file__).with_name("targets_for_mask3.txt")
 LOCK_FILE = OUTPUT_DIR / "mask_text_in_image2.lock"
 
 
