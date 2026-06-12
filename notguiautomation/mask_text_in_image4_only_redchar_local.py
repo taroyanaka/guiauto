@@ -22,7 +22,7 @@ _thread_local = threading.local()
 def get_reader() -> easyocr.Reader:
     reader = getattr(_thread_local, "reader", None)
     if reader is None:
-        reader = easyocr.Reader(["ja", "en"], gpu=False)
+        reader = easyocr.Reader(["ja", "en"], gpu=True)
         _thread_local.reader = reader
     return reader
 

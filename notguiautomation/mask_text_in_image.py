@@ -102,11 +102,16 @@ TARGET_WORDS_DEFAULT = [
 _thread_local = threading.local()
 
 
+def use_gpu() -> bool:
+    value = os.environ.get("MASK_TEXT_USE_GPU", "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def get_reader() -> easyocr.Reader:
     """EasyOCR reader is heavy, so reuse one per worker thread."""
     reader = getattr(_thread_local, "reader", None)
     if reader is None:
-        reader = easyocr.Reader(["ja", "en"], gpu=False)
+        reader = easyocr.Reader(["ja", "en"], gpu=use_gpu())
         _thread_local.reader = reader
     return reader
 
@@ -288,10 +293,10 @@ def to_grayscale_bgr(image: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
 
-def build_output_names(original_name: str) -> tuple[str, str]:
-    safe_name = safe_filename(original_name)
-    path = Path(safe_name)
-    return f"{path.stem}-original{path.suffix}", f"{path.stem}-mask.png"
+def build_output_names(original_name: str) -> tuple[str, str, str]:
+  safe_name = safe_filename(original_name)
+  path = Path(safe_name)
+  return f"{path.stem}-original{path.suffix}", f"{path.stem}-mask.png", f"{path.stem}-masked{path.suffix}"
 
 
 def process_image_bytes(
@@ -309,9 +314,10 @@ def process_image_bytes(
 
     ocr_image = to_grayscale_bgr(image) if grayscale_enabled else image
     mask = mask_specific_words(ocr_image, target_list, color_ocr_strength)
-    original_output_name, mask_output_name = build_output_names(original_name)
+    original_output_name, mask_output_name, masked_output_name = build_output_names(original_name)
     original_output_path = OUTPUT_DIR / original_output_name
     mask_output_path = OUTPUT_DIR / mask_output_name
+    masked_output_path = OUTPUT_DIR / masked_output_name
 
     if output_image_mode == "grayscale":
         ok, encoded = cv2.imencode(Path(original_output_name).suffix or ".png", ocr_image)
@@ -320,15 +326,35 @@ def process_image_bytes(
         original_output_path.write_bytes(encoded.tobytes())
     else:
         original_output_path.write_bytes(data)
-    if not cv2.imwrite(str(mask_output_path), mask):
-        raise RuntimeError(f"{mask_output_name} の保存に失敗しました。")
+    ok, encoded_mask = cv2.imencode('.png', mask)
+    if not ok:
+      raise RuntimeError(f"{mask_output_name} の保存に失敗しました。(エンコード失敗)")
+    mask_output_path.write_bytes(encoded_mask.tobytes())
+
+    # Create composited masked image: overlay black mask onto source image
+    # Use grayscale variant if output_image_mode == 'grayscale', otherwise use original
+    src_for_mask = to_grayscale_bgr(image) if output_image_mode == "grayscale" else image
+    masked_bgr = src_for_mask.copy()
+    if mask.ndim == 3 and mask.shape[2] == 4:
+      alpha = mask[:, :, 3]
+    else:
+      alpha = (mask[:, :, 0] > 0).astype('uint8') * 255
+
+    masked_bgr[alpha > 0] = (0, 0, 0)
+
+    ok2, encoded_masked = cv2.imencode(Path(masked_output_name).suffix or '.png', masked_bgr)
+    if not ok2:
+      raise RuntimeError(f"{masked_output_name} の保存に失敗しました。(エンコード失敗)")
+    masked_output_path.write_bytes(encoded_masked.tobytes())
 
     return {
-        "name": original_name,
-        "original": original_output_name,
-        "original_url": f"/outputs/{quote(original_output_name)}",
-        "mask": mask_output_name,
-        "mask_url": f"/outputs/{quote(mask_output_name)}",
+      "name": original_name,
+      "original": original_output_name,
+      "original_url": f"/outputs/{quote(original_output_name)}",
+      "mask": mask_output_name,
+      "mask_url": f"/outputs/{quote(mask_output_name)}",
+      "masked": masked_output_name,
+      "masked_url": f"/outputs/{quote(masked_output_name)}",
     }
 
 
@@ -358,9 +384,10 @@ def make_zip(results: list[dict[str, str]]) -> str | None:
     zip_path = OUTPUT_DIR / zip_name
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for result in results:
-            for key in ("original", "mask"):
-                filename = result[key]
-                zf.write(OUTPUT_DIR / filename, arcname=filename)
+          for key in ("original", "mask", "masked"):
+            filename = result.get(key)
+            if filename:
+              zf.write(OUTPUT_DIR / filename, arcname=filename)
     return f"/outputs/{quote(zip_name)}"
 
 

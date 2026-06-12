@@ -1,5 +1,12 @@
 *.mp4
 *.srt
+.bmp
+.jpg
+.jpeg
+.png
+.tif
+.tiff
+.webp
 notguiautomation/user_credentials.txt
 notguiautomation/backup.csv
 notguiautomation/targets_user*.txt
