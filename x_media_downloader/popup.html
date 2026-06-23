@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>X Media URL Collector</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b1020;
+        --panel-2: #18213d;
+        --text: #e8eefc;
+        --muted: #a9b6d3;
+        --accent: #7dd3fc;
+        --accent-2: #38bdf8;
+        --border: rgba(255, 255, 255, 0.08);
+      }
+      body {
+        margin: 0;
+        width: 380px;
+        background:
+          radial-gradient(circle at top right, rgba(56, 189, 248, 0.18), transparent 34%),
+          radial-gradient(circle at bottom left, rgba(125, 211, 252, 0.1), transparent 30%),
+          var(--bg);
+        color: var(--text);
+        font-family: "Segoe UI", "Yu Gothic UI", sans-serif;
+      }
+      .wrap {
+        padding: 14px;
+      }
+      h1 {
+        font-size: 17px;
+        margin: 0 0 6px;
+      }
+      p {
+        margin: 0 0 10px;
+        color: var(--muted);
+        line-height: 1.5;
+        font-size: 12px;
+      }
+      .buttons {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      button {
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      #start {
+        flex: 1.2;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        color: #07111f;
+      }
+      #stop {
+        flex: 0.8;
+        background: var(--panel-2);
+        color: var(--text);
+      }
+      textarea {
+        width: 100%;
+        min-height: 240px;
+        box-sizing: border-box;
+        resize: vertical;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: rgba(5, 10, 22, 0.75);
+        color: var(--text);
+        padding: 10px;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .status {
+        margin-top: 8px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .small {
+        margin-top: 6px;
+        display: flex;
+        gap: 8px;
+      }
+      .small button {
+        flex: 1;
+        background: #26324f;
+        color: var(--text);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>X Media URL Collector</h1>
+      <p>Start to repeat the Esc -> Shift+Tab -> Enter cycle, collect the visible URL, and stop when the /media page no longer changes.</p>
+      <div class="buttons">
+        <button id="start">Start</button>
+        <button id="stop">Stop</button>
+      </div>
+      <textarea id="output" placeholder="Collected URLs will appear here"></textarea>
+      <div class="small">
+        <button id="refresh">Refresh</button>
+        <button id="copy">Copy</button>
+      </div>
+      <div id="status" class="status">Idle</div>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

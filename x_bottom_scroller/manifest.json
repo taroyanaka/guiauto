@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "X Bottom Scroller",
+  "version": "1.0.0",
+  "description": "Auto-scrolls the active X page until the bottom is reached.",
+  "permissions": ["activeTab", "scripting"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "X Bottom Scroller"
+  }
+}

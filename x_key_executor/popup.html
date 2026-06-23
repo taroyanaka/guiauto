@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>X Key Executor</title>
+    <style>
+      body {
+        margin: 0;
+        width: 380px;
+        padding: 14px;
+        box-sizing: border-box;
+        background: #0b1020;
+        color: #e8eefc;
+        font-family: "Segoe UI", "Yu Gothic UI", sans-serif;
+      }
+      h1 { margin: 0 0 6px; font-size: 17px; }
+      p { margin: 0 0 10px; font-size: 12px; color: #a9b6d3; line-height: 1.5; }
+      .row { display: flex; gap: 8px; margin-bottom: 10px; }
+      button {
+        flex: 1;
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      #start { background: #7dd3fc; color: #07111f; }
+      #stop { background: #26324f; color: #e8eefc; }
+      textarea {
+        width: 100%;
+        min-height: 240px;
+        box-sizing: border-box;
+        border-radius: 12px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: rgba(5, 10, 22, 0.75);
+        color: #e8eefc;
+        padding: 10px;
+        font-size: 12px;
+        line-height: 1.5;
+        resize: vertical;
+      }
+      .status { margin-top: 8px; font-size: 12px; color: #a9b6d3; }
+    </style>
+  </head>
+  <body>
+    <h1>X Key Executor</h1>
+    <p>Repeat Esc -> Shift+Tab -> Enter, collect visible X media URLs, and stop when /media stops changing.</p>
+    <div class="row">
+      <button id="start">Start</button>
+      <button id="stop">Stop</button>
+    </div>
+    <textarea id="output" placeholder="Collected URLs"></textarea>
+    <div id="status" class="status">Idle</div>
+    <script src="popup.js"></script>
+  </body>
+  </html>

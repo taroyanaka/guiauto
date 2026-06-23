@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "X Media URL Collector",
+  "version": "1.1.0",
+  "description": "Collects X media URLs by stepping through Esc -> Shift+Tab -> Enter cycles and shows the final list.",
+  "permissions": ["activeTab", "storage"],
+  "host_permissions": ["https://x.com/*", "https://twitter.com/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "X Media URL Collector"
+  }
+}

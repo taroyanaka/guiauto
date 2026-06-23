@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>X Bottom Scroller</title>
+    <style>
+      body {
+        margin: 0;
+        width: 280px;
+        padding: 12px;
+        box-sizing: border-box;
+        font-family: "Segoe UI", "Yu Gothic UI", sans-serif;
+        background: #0b1020;
+        color: #e8eefc;
+      }
+      h1 { font-size: 16px; margin: 0 0 8px; }
+      p { margin: 0 0 12px; font-size: 12px; color: #a9b6d3; line-height: 1.5; }
+      .row { display: flex; gap: 8px; }
+      button {
+        flex: 1;
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      #start { background: #7dd3fc; color: #07111f; }
+      #stop { background: #26324f; color: #e8eefc; }
+      .status { margin-top: 10px; font-size: 12px; color: #a9b6d3; }
+    </style>
+  </head>
+  <body>
+    <h1>X Bottom Scroller</h1>
+    <p>Starts a simple auto-scroll until the bottom of the page is reached.</p>
+    <div class="row">
+      <button id="start">Start</button>
+      <button id="stop">Stop</button>
+    </div>
+    <div id="status" class="status">Idle</div>
+    <script src="popup.js"></script>
+  </body>
+  </html>

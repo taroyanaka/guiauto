@@ -15,6 +15,9 @@ OUTPUT_DIR = APP_DIR / "masked_outputs_local"
 SUPPORTED_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
 DEFAULT_COLOR_OCR_STRENGTH = "strong"
 DEFAULT_COLOR_TARGET = "red_orange"
+DEFAULT_OCR_CONFIDENCE = 0.20
+DEFAULT_USE_OCR_HYBRID = True
+DEFAULT_UPSCALE_FACTOR = 4
 
 _thread_local = threading.local()
 
@@ -22,7 +25,10 @@ _thread_local = threading.local()
 def get_reader() -> easyocr.Reader:
     reader = getattr(_thread_local, "reader", None)
     if reader is None:
-        reader = easyocr.Reader(["ja", "en"], gpu=True)
+        try:
+            reader = easyocr.Reader(["ja", "en"], gpu=True)
+        except Exception:
+            reader = easyocr.Reader(["ja", "en"], gpu=False)
         _thread_local.reader = reader
     return reader
 
@@ -52,63 +58,213 @@ def get_color_thresholds(color_ocr_strength: str, color_target: str) -> dict[str
     return thresholds
 
 
-def make_color_pixel_mask(image: np.ndarray, color_ocr_strength: str, color_target: str) -> np.ndarray:
-    threshold = get_color_thresholds(color_ocr_strength, color_target)
+def apply_white_balance(image: np.ndarray) -> np.ndarray:
+    if hasattr(cv2, "xphoto") and hasattr(cv2.xphoto, "createSimpleWB"):
+        try:
+            wb = cv2.xphoto.createSimpleWB()
+            return wb.balanceWhite(image)
+        except cv2.error:
+            pass
+    return image
+
+
+def upscale_image(image: np.ndarray, scale: int = DEFAULT_UPSCALE_FACTOR) -> np.ndarray:
+    if scale <= 1:
+        return image
+    return cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+
+def enhance_contrast(image: np.ndarray) -> np.ndarray:
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l_channel = clahe.apply(l_channel)
+    return cv2.cvtColor(cv2.merge((l_channel, a_channel, b_channel)), cv2.COLOR_LAB2BGR)
+
+
+def preprocess_for_color_detection(image: np.ndarray) -> np.ndarray:
+    return enhance_contrast(apply_white_balance(image))
+
+
+def get_dynamic_kernel(image: np.ndarray, divisor: int = 100, minimum: int = 3, maximum: int = 15) -> np.ndarray:
+    short_side = min(image.shape[:2])
+    size = max(minimum, min(maximum, short_side // divisor))
+    if size % 2 == 0:
+        size += 1
+    return np.ones((size, size), np.uint8)
+
+
+def mask_from_boxes(shape: tuple[int, int], boxes: list[list[list[float]]], padding_ratio: float = 0.08) -> np.ndarray:
+    height, width = shape
+    mask = np.zeros((height, width), dtype=np.uint8)
+    for box in boxes:
+        xs = [point[0] for point in box]
+        ys = [point[1] for point in box]
+        x1 = max(0, int(np.floor(min(xs))))
+        y1 = max(0, int(np.floor(min(ys))))
+        x2 = min(width, int(np.ceil(max(xs))))
+        y2 = min(height, int(np.ceil(max(ys))))
+        pad_x = max(1, int((x2 - x1) * padding_ratio))
+        pad_y = max(1, int((y2 - y1) * padding_ratio))
+        cv2.rectangle(mask, (max(0, x1 - pad_x), max(0, y1 - pad_y)), (min(width, x2 + pad_x), min(height, y2 + pad_y)), 255, -1)
+    return mask
+
+
+def get_text_regions(image: np.ndarray, min_confidence: float = DEFAULT_OCR_CONFIDENCE) -> np.ndarray | None:
+    reader = get_reader()
+    boxes: list[list[list[float]]] = []
+    for result in reader.readtext(image, text_threshold=0.25, low_text=0.15, link_threshold=0.15):
+        bbox, _text, confidence = result
+        if confidence >= min_confidence:
+            boxes.append(bbox)
+    if not boxes:
+        return None
+    return mask_from_boxes(image.shape[:2], boxes)
+
+
+def rgb_red_mask(image: np.ndarray) -> np.ndarray:
+    b_channel, g_channel, r_channel = cv2.split(image)
+    return ((r_channel.astype(np.int16) - g_channel.astype(np.int16) > 30) & (r_channel.astype(np.int16) - b_channel.astype(np.int16) > 30))
+
+
+def hsv_red_mask(image: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    hue, saturation, value = cv2.split(hsv)
+    return (((hue < 15) | (hue > 160)) & (saturation > 25) & (value > 20))
+
+
+def lab_red_mask(image: np.ndarray) -> np.ndarray:
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    return lab[:, :, 1] > 130
+
+
+def make_color_pixel_mask(
+    image: np.ndarray,
+    color_ocr_strength: str,
+    color_target: str,
+    roi_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    prepared = preprocess_for_color_detection(image)
+    threshold = get_color_thresholds(color_ocr_strength, color_target)
+    hsv = cv2.cvtColor(prepared, cv2.COLOR_BGR2HSV)
     hue = hsv[:, :, 0]
     saturation = hsv[:, :, 1]
     value = hsv[:, :, 2]
 
-    red_pixels = ((hue <= 20) | (hue >= 160)) & (saturation >= threshold["red_s"]) & (value >= threshold["red_v"])
-    warm_pixels = (
-        ((hue >= threshold["hue_min"]) & (hue <= threshold["hue_max"]))
-        | ((hue >= threshold["hue_wrap_min"]) & (hue <= threshold["hue_wrap_max"]))
-    ) & (saturation >= threshold["red_s"]) & (value >= threshold["red_v"])
-    vivid_pixels = (
-        (saturation >= threshold["vivid_s"]) & (value >= threshold["vivid_v"])
-        if threshold["use_vivid"]
-        else np.zeros_like(saturation, dtype=bool)
+    hsv_pixels = (
+        ((hue < threshold["hue_max"]) | (hue > threshold["hue_wrap_min"]))
+        & (saturation > max(20, threshold["red_s"]))
+        & (value > max(20, threshold["red_v"]))
     )
+    color_pixels = (
+        rgb_red_mask(prepared)
+        | hsv_pixels
+        | lab_red_mask(prepared)
+    ).astype(np.uint8) * 255
+    if roi_mask is not None:
+        color_pixels = cv2.bitwise_and(color_pixels, roi_mask)
 
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    a_channel = lab[:, :, 1]
-    red_lab_pixels = (
-        (a_channel >= threshold["lab_a"]) & (value >= threshold["red_v"])
-        if threshold["use_lab"]
-        else np.zeros_like(a_channel, dtype=bool)
-    )
-
-    color_pixels = (red_pixels | warm_pixels | vivid_pixels | red_lab_pixels).astype(np.uint8) * 255
-    color_pixels = cv2.morphologyEx(color_pixels, cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8))
-    if color_ocr_strength == "strong":
-        color_pixels = cv2.dilate(color_pixels, np.ones((2, 2), np.uint8), iterations=1)
+    kernel = np.ones((2, 2), np.uint8)
+    color_pixels = cv2.morphologyEx(color_pixels, cv2.MORPH_CLOSE, kernel)
     return color_pixels
+
+
+def component_boxes(mask: np.ndarray) -> list[tuple[int, int, int, int]]:
+    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
+    boxes: list[tuple[int, int, int, int]] = []
+    for i in range(1, count):
+        x, y, w, h, area = stats[i]
+        if area < 2:
+            continue
+        boxes.append((int(x), int(y), int(w), int(h)))
+    return boxes
+
+
+def filter_boxes(boxes: list[tuple[int, int, int, int]], image_shape: tuple[int, int]) -> list[tuple[int, int, int, int]]:
+    height, width = image_shape
+    kept: list[tuple[int, int, int, int]] = []
+    for x, y, w, h in boxes:
+        area = w * h
+        if area < 2 or area > (height * width):
+            continue
+        if w <= 0 or h <= 0:
+            continue
+        aspect_ratio = max(w / h, h / w)
+        extent = 1.0
+        if aspect_ratio > 12.0:
+            continue
+        if extent < 0.08:
+            continue
+        kept.append((x, y, w, h))
+    return kept
+
+
+def expand_box(x: int, y: int, w: int, h: int, image: np.ndarray) -> tuple[int, int, int, int]:
+    pad = max(2, int(min(w, h) * 0.5))
+    height, width = image.shape[:2]
+    return (
+        max(0, x - pad),
+        max(0, y - pad),
+        min(width, x + w + pad),
+        min(height, y + h + pad),
+    )
 
 
 def mask_red_characters(
     image: np.ndarray,
     color_ocr_strength: str = DEFAULT_COLOR_OCR_STRENGTH,
     color_target: str = DEFAULT_COLOR_TARGET,
+    use_ocr_hybrid: bool = DEFAULT_USE_OCR_HYBRID,
 ) -> np.ndarray:
-    height, width = image.shape[:2]
+    upscaled = upscale_image(image, DEFAULT_UPSCALE_FACTOR)
+    height, width = upscaled.shape[:2]
     mask = np.zeros((height, width, 4), dtype=np.uint8)
-    color_pixels = make_color_pixel_mask(image, color_ocr_strength, color_target)
+    roi_mask = get_text_regions(upscaled) if use_ocr_hybrid else None
+    color_pixels = make_color_pixel_mask(upscaled, color_ocr_strength, color_target, roi_mask=roi_mask)
     if not np.any(color_pixels):
         return mask
 
-    expanded = cv2.dilate(color_pixels, np.ones((3, 3), np.uint8), iterations=1)
-    contours, _ = cv2.findContours(expanded, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    for contour in contours:
-        if cv2.contourArea(contour) < 3:
+    kernel = np.ones((2, 2), np.uint8)
+    color_pixels = cv2.morphologyEx(color_pixels, cv2.MORPH_CLOSE, kernel)
+    boxes = filter_boxes(component_boxes(color_pixels), (height, width))
+
+    ocr_boxes: list[tuple[int, int, int, int]] = []
+    if use_ocr_hybrid:
+        reader = get_reader()
+        for bbox, _text, confidence in reader.readtext(upscaled, text_threshold=0.25, low_text=0.15, link_threshold=0.15):
+            if confidence < DEFAULT_OCR_CONFIDENCE:
+                continue
+            xs = [point[0] for point in bbox]
+            ys = [point[1] for point in bbox]
+            x1 = max(0, int(np.floor(min(xs))))
+            y1 = max(0, int(np.floor(min(ys))))
+            x2 = min(width, int(np.ceil(max(xs))))
+            y2 = min(height, int(np.ceil(max(ys))))
+            ocr_boxes.append((x1, y1, max(1, x2 - x1), max(1, y2 - y1)))
+
+    for x, y, w, h in boxes:
+        start_x, start_y, end_x, end_y = expand_box(x, y, w, h, upscaled)
+        candidate = color_pixels[start_y:end_y, start_x:end_x]
+        if candidate.size == 0:
             continue
-        x, y, w, h = cv2.boundingRect(contour)
-        padding_x = max(1, w // 10)
-        padding_y = max(1, h // 10)
-        start_x = max(0, x - padding_x)
-        start_y = max(0, y - padding_y)
-        end_x = min(width, x + w + padding_x)
-        end_y = min(height, y + h + padding_y)
-        cv2.rectangle(mask, (start_x, start_y), (end_x, end_y), (0, 0, 0, 255), -1)
+        overlap = float(candidate.mean()) / 255.0
+        if use_ocr_hybrid and ocr_boxes:
+            matched = False
+            for ox, oy, ow, oh in ocr_boxes:
+                ix1 = max(start_x, ox)
+                iy1 = max(start_y, oy)
+                ix2 = min(end_x, ox + ow)
+                iy2 = min(end_y, oy + oh)
+                if ix2 <= ix1 or iy2 <= iy1:
+                    continue
+                matched = True
+                if overlap > 0.15:
+                    cv2.rectangle(mask, (start_x, start_y), (end_x, end_y), (0, 0, 0, 255), -1)
+                    break
+            if not matched and overlap > 0.25:
+                cv2.rectangle(mask, (start_x, start_y), (end_x, end_y), (0, 0, 0, 255), -1)
+        elif overlap > 0.15:
+            cv2.rectangle(mask, (start_x, start_y), (end_x, end_y), (0, 0, 0, 255), -1)
 
     return mask
 
@@ -133,7 +289,8 @@ def process_image_file(image_path: Path, color_ocr_strength: str, color_target: 
     if image is None:
         raise ValueError(f"failed to read image: {image_path}")
 
-    mask = mask_red_characters(image, color_ocr_strength, color_target)
+    upscaled_mask = mask_red_characters(image, color_ocr_strength, color_target)
+    mask = cv2.resize(upscaled_mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
     composited = overlay_mask_on_image(image, mask)
 
     original_output_name, mask_output_name = build_output_names(image_path.name)
